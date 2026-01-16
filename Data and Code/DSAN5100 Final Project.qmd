@@ -1,0 +1,2193 @@
+---
+title: "DSAN5100 Final Project - R"
+author:
+  - "Jing Tan"
+  - "Yanzhen Gao"
+  - "Yanmin Gui"
+  - "Jiayuan Gong"
+toc: true
+
+format:
+
+  pdf:
+    documentclass: article
+    keep-tex: false
+    geometry: margin=1in
+    include-in-header:
+      text: |
+        \usepackage{fvextra}
+        \DefineVerbatimEnvironment{Highlighting}{Verbatim}{breaklines,breakanywhere,commandchars=\\\{\}}
+---
+
+# Understanding the Housing Affordability Crisis: National Trends, Regional Disparities, and Economic Drivers in the U.S.
+(DSAN 5100-01)
+
+## Implementation and Reproducibility Statement
+
+All data cleaning, statistical testing, and model estimation were conducted within a reproducible computational environment. The analytical workflow and results can be fully replicated using the original publicly available data. This design ensures that research conclusions are not only statistically valid but also methodologically transparent and reproducible.
+
+## 1. Data Collection
+
+```{r}
+# Load required packages
+library(tidyverse)
+library(lubridate)
+
+# 1. Read the original FHFA master CSV
+# Make sure "hpi_master.csv" is in your current working directory
+hpi_raw <- read_csv("data_part/hpi_master.csv", show_col_types = FALSE)
+
+# 2. Create a proper Date column for monthly and quarterly data
+
+# Helper function: build a Date for monthly data (year-month-01)
+make_date_monthly <- function(year, month) {
+  as.Date(sprintf("%d-%02d-01", year, month))
+}
+
+# Helper function: build a Date for quarterly data (use quarter-end month)
+# Here we set Q1 -> March, Q2 -> June, Q3 -> September, Q4 -> December
+make_date_quarterly <- function(year, quarter) {
+  month <- quarter * 3
+  as.Date(sprintf("%d-%02d-01", year, month))
+}
+
+hpi <- hpi_raw %>%
+  mutate(
+    date = case_when(
+      frequency == "monthly"   ~ make_date_monthly(yr, period),
+      frequency == "quarterly" ~ make_date_quarterly(yr, period),
+      TRUE ~ NA_Date_
+    )
+  )
+
+# only keep observations from year 2000 onward
+hpi_2000 <- hpi %>% 
+  filter(yr >= 2000)
+
+# 3. National monthly SA series (purchase-only)
+
+national_monthly_sa <- hpi_2000 %>%
+  filter(
+    level      == "USA or Census Division",
+    place_name == "United States",
+    frequency  == "monthly",
+    hpi_flavor == "purchase-only"
+  ) %>%
+  arrange(date) %>%
+  select(
+    place_name, place_id, level, hpi_type, hpi_flavor,
+    frequency, yr, period, date, index_sa
+  )
+
+# Write to CSV
+write_csv(national_monthly_sa, "data_part/fhfa_us_monthly_sa.csv")
+
+# 4. National quarterly SA series
+
+national_quarterly_sa <- hpi_2000 %>%
+  filter(
+    level      == "USA or Census Division",
+    place_name == "United States",
+    frequency  == "quarterly",
+    hpi_flavor == "purchase-only"
+  ) %>%
+  arrange(date) %>%
+  select(
+    place_name, place_id, level, hpi_type, hpi_flavor,
+    frequency, yr, period, date, index_sa
+  )
+
+write_csv(national_quarterly_sa, "data_part/fhfa_us_quarterly_sa.csv")
+
+# 5. Helper function: quarterly SA series for one state
+
+get_state_quarterly_sa <- function(df, state_code) {
+  df %>%
+    filter(
+      hpi_flavor == "purchase-only",
+      frequency  == "quarterly",
+      level      == "State",
+      place_id   == state_code,
+      yr         >= 2000
+    ) %>%
+    arrange(date) %>%
+    select(
+      place_name, place_id, level, hpi_type, hpi_flavor,
+      frequency, yr, period, date, index_sa
+    )
+}
+
+# 6. Extract the six states / regions of interest
+# Hawaii (HI), West Virginia (WV), Utah (UT), Alabama (AL),
+# District of Columbia (DC), Mississippi (MS)
+
+state_hi_sa <- get_state_quarterly_sa(hpi, "HI")
+state_wv_sa <- get_state_quarterly_sa(hpi, "WV")
+state_ut_sa <- get_state_quarterly_sa(hpi, "UT")
+state_al_sa <- get_state_quarterly_sa(hpi, "AL")
+state_dc_sa <- get_state_quarterly_sa(hpi, "DC")
+state_ms_sa <- get_state_quarterly_sa(hpi, "MS")
+
+# 7. Write each state+frequency combination to its own CSV
+
+write_csv(state_hi_sa, "data_part/fhfa_hi_quarterly.csv")
+write_csv(state_wv_sa, "data_part/fhfa_wv_quarterly.csv")
+write_csv(state_ut_sa, "data_part/fhfa_ut_quarterly.csv")
+write_csv(state_al_sa, "data_part/fhfa_al_quarterly.csv")
+write_csv(state_dc_sa, "data_part/fhfa_dc_quarterly.csv")
+write_csv(state_ms_sa, "data_part/fhfa_ms_quarterly.csv")
+```
+
+## 2. Data Cleaning
+
+### 2.1 Main Story Data
+
+```{r}
+## 0. Read all raw CSV files
+
+## FHFA national monthly SA house price index
+fhfa <- read.csv("data_part/fhfa_us_monthly_sa.csv",
+                 stringsAsFactors = FALSE)
+
+## Disposable Personal Income (DPI) from FRED
+## Column 'A229RC0' will be divided by 12
+dpi  <- read.csv("data_part/Disposable Personal Income.csv",
+                 stringsAsFactors = FALSE)
+
+## 30-year mortgage rate (weekly), MORTGAGE30US from FRED
+mort <- read.csv("data_part/MORTGAGE30US.csv",
+                 stringsAsFactors = FALSE)
+
+## Rental index, monthly (CPI rent)
+rent <- read.csv("data_part/Rental_Index.csv",
+                 stringsAsFactors = FALSE)
+
+
+## 1. Prepare a proper Date column in each table
+
+## FHFA already has a 'date' column in "YYYY-MM-DD" format
+fhfa$date <- as.Date(fhfa$date)
+
+## DPI: use 'observation_date' as date
+dpi$date <- as.Date(dpi$observation_date)
+
+## Mortgage: weekly dates in 'observation_date'
+mort$obs_date <- as.Date(mort$observation_date)
+
+## Rental index: monthly dates in 'observation_date'
+rent$date <- as.Date(rent$observation_date)
+
+## 2. Keep FHFA observations from year >= 2000
+
+fhfa$year <- as.numeric(format(fhfa$date, "%Y"))
+fhfa_2000 <- fhfa[fhfa$year >= 2000, ]
+
+## 3. Construct monthly wage_income from DPI
+
+## IMPORTANT:
+## Column 'A229RC0' is the original DPI series in the CSV.
+## Divided by 12 to approximate monthly disposable income.
+dpi$wage_income <- dpi$A229RC0 / 12
+
+## Keep only date and wage_income
+dpi_sub <- dpi[, c("date", "wage_income")]
+
+## 4. Aggregate weekly mortgage rates to monthly
+
+## Extract year-month from weekly dates
+mort$year  <- as.numeric(format(mort$obs_date, "%Y"))
+mort$month <- as.numeric(format(mort$obs_date, "%m"))
+
+## Create a "YYYY-MM" key
+mort$ym <- paste(mort$year,
+                 sprintf("%02d", mort$month),
+                 sep = "-")
+
+## Compute monthly average mortgage rate
+mort_monthly <- aggregate(MORTGAGE30US ~ ym,
+                          data = mort,
+                          FUN = mean, na.rm = TRUE)
+
+## Create a Date for each year-month (use 1st day of month)
+mort_monthly$date <- as.Date(paste(mort_monthly$ym, "01", sep = "-"))
+
+## Keep only date and monthly mortgage rate
+mort_sub <- mort_monthly[, c("date", "MORTGAGE30US")]
+names(mort_sub)[2] <- "mortgage_rate"
+
+## 5. Prepare house_price and rent_cost
+
+## FHFA: use index_sa as house_price
+fhfa_sub <- fhfa_2000[, c("date", "index_sa", "year")]
+names(fhfa_sub)[names(fhfa_sub) == "index_sa"] <- "house_price"
+
+## Rental index: use CUUR0000SEHA as rent_cost
+rent_sub <- rent[, c("date", "CUUR0000SEHA")]
+names(rent_sub)[2] <- "rent_cost"
+
+## 6. Merge all four datasets by 'date'
+
+## Merge FHFA + DPI
+df <- merge(fhfa_sub, dpi_sub, by = "date", all = FALSE)
+
+## Merge with mortgage (monthly average)
+df <- merge(df, mort_sub, by = "date", all = FALSE)
+
+## Merge with rental index
+df <- merge(df, rent_sub, by = "date", all = FALSE)
+
+## Recompute year from the final 'date' just to be safe
+df$year <- as.numeric(format(df$date, "%Y"))
+
+## 7. Construct affordability indices
+
+df$home_aff <- df$house_price / df$wage_income
+df$rent_aff <- df$rent_cost / df$wage_income
+
+## 8. Define 'period' groups based on year
+
+df$period <- NA_character_
+
+df$period[df$year >= 2000 & df$year <= 2007] <- "2000-2007"
+df$period[df$year >= 2008 & df$year <= 2013] <- "2008-2013"
+df$period[df$year >= 2014 & df$year <= 2019] <- "2014-2019"
+df$period[df$year >= 2020]                   <- "2020-2025"
+
+## 9. High-affordability indicators
+## home_aff_high = 1 if home_aff above median, 0 otherwise
+## rent_aff_high = 1 if rent_aff above median, 0 otherwise
+
+home_med <- median(df$home_aff, na.rm = TRUE)
+rent_med <- median(df$rent_aff, na.rm = TRUE)
+
+df$home_aff_high <- ifelse(df$home_aff > home_med, 1L, 0L)
+df$rent_aff_high <- ifelse(df$rent_aff > rent_med, 1L, 0L)
+
+## 10. Select final columns and sort by date
+
+final_cols <- c("date",
+                "house_price",
+                "rent_cost",
+                "wage_income",
+                "mortgage_rate",
+                "home_aff",
+                "rent_aff",
+                "period",
+                "home_aff_high",
+                "rent_aff_high",
+                "year")
+
+final_df <- df[, final_cols]
+
+## Sort by date in ascending order
+final_df <- final_df[order(final_df$date), ]
+
+## 11. Export the final clean dataset
+
+
+write.csv(final_df,
+          file = "data_part/housing_affordability_monthly_final.csv",
+          row.names = FALSE)
+
+```
+
+### 2.2 States and Regions’ Data
+
+```{r}
+## 0. Read all required CSV files
+
+fhfa_us <- read.csv("data_part/fhfa_us_quarterly_sa.csv", stringsAsFactors = FALSE)
+fhfa_hi <- read.csv("data_part/fhfa_hi_quarterly.csv", stringsAsFactors = FALSE)
+fhfa_wv <- read.csv("data_part/fhfa_wv_quarterly.csv", stringsAsFactors = FALSE)
+fhfa_ut <- read.csv("data_part/fhfa_ut_quarterly.csv", stringsAsFactors = FALSE)
+fhfa_al <- read.csv("data_part/fhfa_al_quarterly.csv", stringsAsFactors = FALSE)
+fhfa_dc <- read.csv("data_part/fhfa_dc_quarterly.csv", stringsAsFactors = FALSE)
+fhfa_ms <- read.csv("data_part/fhfa_ms_quarterly.csv", stringsAsFactors = FALSE)
+
+pi_annual <- read.csv("data_part/personal income.csv",
+                      stringsAsFactors = FALSE,
+                      check.names = FALSE)
+
+dpi_q <- read.csv("data_part/Quarterly_Disposable personal income.csv",
+                  stringsAsFactors = FALSE)
+
+## 1. Prepare US Quarterly Income (divide by 12)
+
+dpi_q$date <- as.Date(dpi_q$observation_date)
+dpi_q$year <- as.numeric(format(dpi_q$date, "%Y"))
+dpi_q$quarter <- as.numeric(format(dpi_q$date, "%m")) %/% 3 + 1
+
+dpi_q$income_US <- dpi_q$A229RC0Q052SBEA / 12  ## per-quarter income
+
+dpi_us_quarterly <- dpi_q[, c("year", "quarter", "income_US")]
+
+## 2. Quarterly HPI helper function
+
+make_q_hpi <- function(df, state_code) {
+  tmp <- df[, c("yr", "period", "index_sa")]
+  names(tmp) <- c("year", "quarter", "HPI_state")
+  tmp$state_code <- state_code
+  tmp
+}
+
+hpi_us_q <- fhfa_us[, c("yr", "period", "index_sa")]
+names(hpi_us_q) <- c("year", "quarter", "HPI_US")
+
+hpi_hi_q <- make_q_hpi(fhfa_hi, "HI")
+hpi_wv_q <- make_q_hpi(fhfa_wv, "WV")
+hpi_ut_q <- make_q_hpi(fhfa_ut, "UT")
+hpi_al_q <- make_q_hpi(fhfa_al, "AL")
+hpi_dc_q <- make_q_hpi(fhfa_dc, "DC")
+hpi_ms_q <- make_q_hpi(fhfa_ms, "MS")
+
+## Combine state-level HPI
+hpi_states_q <- rbind(hpi_hi_q, hpi_wv_q, hpi_ut_q,
+                      hpi_al_q, hpi_dc_q, hpi_ms_q)
+
+## 3. Convert annual state income into quarterly income
+
+## Keep only US + our 6 states
+pi_annual$state_code <- NA
+pi_annual$state_code[pi_annual$GeoName == "United States *"]      <- "US"
+pi_annual$state_code[pi_annual$GeoName == "Hawaii *"]             <- "HI"
+pi_annual$state_code[pi_annual$GeoName == "West Virginia"]        <- "WV"
+pi_annual$state_code[pi_annual$GeoName == "Utah"]                 <- "UT"
+pi_annual$state_code[pi_annual$GeoName == "Alabama"]              <- "AL"
+pi_annual$state_code[pi_annual$GeoName == "District of Columbia"] <- "DC"
+pi_annual$state_code[pi_annual$GeoName == "Mississippi"]          <- "MS"
+
+pi_annual <- pi_annual[!is.na(pi_annual$state_code), ]
+
+years_vec <- 2000:2024
+year_cols <- as.character(years_vec)
+
+pi_long <- reshape(pi_annual,
+                   varying = year_cols,
+                   v.names = "income_annual",
+                   timevar = "year",
+                   times = years_vec,
+                   idvar = "state_code",
+                   direction = "long")
+
+pi_long <- pi_long[, c("state_code", "year", "income_annual")]
+
+## Expand to quarterly using linear interpolation
+make_quarterly_income <- function(df_state) {
+  y <- df_state$income_annual
+  yrs <- df_state$year
+  
+  t <- yrs * 4  ## map each year to a time point (every 4 units)
+
+  tq <- seq(min(t), max(t), by = 1)  ## quarterly time points
+  
+  yq <- approx(x = t, y = y, xout = tq)$y
+  
+  years_q <- tq %/% 4
+  quarter_q <- tq %% 4 + 1
+  
+  data.frame(state_code = df_state$state_code[1],
+             year = years_q,
+             quarter = quarter_q,
+             income_state = yq/12)
+}
+
+income_states_q <- do.call(rbind,
+                           lapply(split(pi_long, pi_long$state_code),
+                                  make_quarterly_income))
+
+## US quarterly income already prepared in dpi_us_quarterly
+
+## 4. Build state-level AffordGap (relative to US) and AffordLevel (relative to own base)
+
+build_affordgap_q <- function(state_code) {
+  
+  # Subset state-level HPI (quarterly)
+  hpi_s <- hpi_states_q[hpi_states_q$state_code == state_code,
+                        c("year", "quarter", "HPI_state", "state_code")]
+  
+  # US HPI (quarterly)
+  hpi_us <- hpi_us_q
+  
+  # State-level quarterly income (interpolated)
+  inc_s <- income_states_q[income_states_q$state_code == state_code,
+                           c("year", "quarter", "income_state")]
+  
+  # US quarterly income (from DPI)
+  inc_us <- dpi_us_quarterly
+  
+  # Merge all components by year and quarter
+  df <- merge(hpi_s, hpi_us, by = c("year", "quarter"), all = FALSE)
+  df <- merge(df, inc_s, by = c("year", "quarter"), all = FALSE)
+  df <- merge(df, inc_us, by = c("year", "quarter"), all = FALSE)
+  
+  # Ensure rows are ordered in time
+  df <- df[order(df$year, df$quarter), ]
+  
+  ## Relative to US: AffordGap (your original measure)
+  df$RelPrice  <- df$HPI_state    / df$HPI_US
+  df$RelIncome <- df$income_state / df$income_US
+  df$AffordGap <- df$RelPrice / df$RelIncome
+  
+  ## Relative to own base: AffordLevel_{s,t}
+  ## Use the earliest available quarter for this state as the base (in your data: 2000 Q1)
+  base_hpi <- df$HPI_state[1L]
+  base_inc <- df$income_state[1L]
+  
+  # State-specific price and income indices (base period = 1)
+  df$PriceIndexSelf  <- df$HPI_state    / base_hpi
+  df$IncomeIndexSelf <- df$income_state / base_inc
+  
+  # AffordLevel: change in affordability relative to the state's own base period
+  df$AffordLevel <- df$PriceIndexSelf / df$IncomeIndexSelf
+  
+  # Make sure state_code column is present and correct
+  df$state_code <- state_code
+  
+  df
+}
+
+## Build quarterly series for each selected state
+ag_hi <- build_affordgap_q("HI")
+ag_wv <- build_affordgap_q("WV")
+ag_ut <- build_affordgap_q("UT")
+ag_al <- build_affordgap_q("AL")
+ag_dc <- build_affordgap_q("DC")
+ag_ms <- build_affordgap_q("MS")
+
+## Combine all states into one data frame
+affordgap_quarterly <- rbind(ag_hi, ag_wv, ag_ut,
+                             ag_al, ag_dc, ag_ms)
+
+## Sort by state, year, and quarter
+affordgap_quarterly <- affordgap_quarterly[
+  order(affordgap_quarterly$state_code,
+        affordgap_quarterly$year,
+        affordgap_quarterly$quarter),
+]
+
+## Export to CSV
+write.csv(affordgap_quarterly,
+          "data_part/state_affordgap_quarterly.csv",
+          row.names = FALSE)
+
+```
+
+## 3. EDA
+```{r setup, include=FALSE}
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(dplyr)
+# stats / ANOVA / Tukey
+library(car)
+library(emmeans)
+# data handling
+library(reshape2)
+library(broom)
+# plotting
+library(gridExtra)
+# bootstrap
+library(boot)
+library(scales)
+```
+
+### 3.1 Nation
+```{r}
+if (!require("tidyverse")) install.packages("tidyverse")
+library(tidyverse)
+library(lubridate)
+
+# 1. Load Data
+df <- read_csv("data_part/housing_affordability_monthly_final.csv")
+df <- df %>% mutate(date = ymd(date))
+
+# 2. Define Structural Breaks Data Frame
+# To ensure geom_vline generates a legend entry,
+# it is best to pass the breaks as a separate data frame
+breaks_df <- data.frame(
+  date = as.Date(c("2008-01-01", "2014-01-01", "2020-01-01")),
+  type = "Structural Breaks"  # This string will appear in the legend
+)
+
+# 3. Plotting
+p <- ggplot(df) +
+  
+  # Layer 1: Home Affordability (Blue)
+  geom_line(
+    aes(x = date, y = home_aff, color = "Home Affordability Index"),
+    size = 1.2
+  ) +
+  
+  # Layer 2: Rent Affordability (Orange)
+  geom_line(
+    aes(x = date, y = rent_aff, color = "Rent Affordability Index"),
+    size = 1.2
+  ) +
+  
+  # Layer 3: Structural Break Lines
+  geom_vline(
+    data = breaks_df,
+    aes(xintercept = date, linetype = type),
+    color = "red",
+    size = 0.8
+  ) +
+  
+  # Scale Formatting
+  scale_color_manual(
+    name = "Metric",
+    values = c(
+      "Home Affordability Index" = "#1f77b4",
+      "Rent Affordability Index" = "#ff7f0e"
+    )
+  ) +
+  
+  scale_linetype_manual(
+    name = "Event",
+    values = c("Structural Breaks" = "dashed")
+  ) +
+  
+  # Labels
+  labs(
+    title = "Structural Breaks in Affordability Indices",
+    x = "Year",
+    y = "Affordability Index"
+  ) +
+  
+  scale_x_date(date_breaks = "2 years", date_labels = "%Y") +
+  
+  # Theme Adjustments (Optimized for Spacing)
+  theme_minimal() + 
+  theme(
+    # 1. Title styling
+    plot.title = element_text(
+      face = "bold",
+      size = 18,
+      margin = margin(b = 20),
+      hjust = 0.5
+    ),
+    
+    # 2. Axis titles
+    axis.title = element_text(face = "bold", size = 14),
+    axis.title.x = element_text(margin = margin(t = 14)), 
+    axis.title.y = element_text(margin = margin(r = 14)), 
+    
+    # 3. Axis tick labels
+    axis.text = element_text(size = 14, color = "black"),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    
+    # 4. Axis tick marks
+    axis.ticks = element_line(color = "black", size = 1),
+    axis.ticks.length = unit(0.25, "cm"),
+    
+    # 5. Legend settings
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    legend.title = element_text(face = "bold", size = 14),
+    legend.text = element_text(size = 14),
+    legend.margin = margin(t = 10), 
+    
+    # Panel and Grid
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, size = 1),
+    
+    
+  )
+
+print(p)
+
+```
+
+### 3.2 States and Regions
+```{r}
+# Regional Affordability (Full State Names Version - Including DC)
+
+
+if (!require("tidyverse")) install.packages("tidyverse")
+library(tidyverse)
+library(lubridate)
+
+# Load Data
+df <- read_csv("data_part/state_affordgap_quarterly.csv")
+
+# Prepare National Data (Baseline)
+df_us <- df %>%
+  select(year, quarter, HPI_US, income_US) %>%
+  distinct() %>%
+  na.omit() %>%
+  group_by(year, quarter) %>%
+  summarise(HPI_US = mean(HPI_US, na.rm = TRUE), 
+            income_US = mean(income_US, na.rm = TRUE), 
+            .groups = 'drop') %>%
+  arrange(year, quarter)
+
+# Calculate Index (Base 2000 Q1 = 1.0)
+base_hpi <- df_us$HPI_US[1]
+base_inc <- df_us$income_US[1]
+
+df_us <- df_us %>%
+  mutate(
+    Date = ymd(paste(year, (quarter*3)-2, "01", sep="-")),
+    PriceIndex = HPI_US / base_hpi,
+    IncomeIndex = income_US / base_inc,
+    AffordLevel = PriceIndex / IncomeIndex,
+    Entity = "National Average"
+  )
+
+# Prepare State Data (WITH FULL NAMES)
+state_lookup <- c(
+  "UT" = "Utah",
+  "HI" = "Hawaii",
+  "AL" = "Alabama",
+  "MS" = "Mississippi",
+  "WV" = "West Virginia",
+  "DC" = "District of Columbia" 
+)
+
+target_states <- names(state_lookup)
+
+# Prepare State Data (df_states)
+df_states <- df %>%
+  filter(state_code %in% target_states) %>%
+  select(year, quarter, state_code, HPI_state, income_state) %>%
+  drop_na(HPI_state, income_state) %>%
+  group_by(year, quarter, state_code) %>%
+  summarise(
+    HPI_state = mean(HPI_state, na.rm = TRUE),
+    income_state = mean(income_state, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(state_code, year, quarter) %>%
+  group_by(state_code) %>%
+  mutate(
+    Date = ymd(paste(year, (quarter * 3) - 2, "01", sep = "-")),
+    PriceIndex = HPI_state / first(HPI_state),
+    IncomeIndex = income_state / first(income_state),
+    AffordLevel = PriceIndex / IncomeIndex,
+    Entity = unname(state_lookup[state_code])
+  ) %>%
+  ungroup()
+
+# Added Color for District of Columbia
+my_colors <- c(
+  "Utah"                 = "#D55E00", 
+  "Hawaii"               = "#E69F00", 
+  "Alabama"              = "#56B4E9", 
+  "Mississippi"          = "#0072B2", 
+  "West Virginia"        = "#009E73",
+  "District of Columbia" = "#CC79A7"  # New Color (Reddish Purple)
+)
+p <- ggplot() +
+  # Reference Line
+  geom_hline(yintercept = 1, linetype = "dashed", color = "gray40", size = 1) +
+  annotate("text", x = min(df_us$Date), y = 0.95, 
+           label = "Baseline", 
+           hjust = 0, size = 5, color = "gray40", fontface = "italic") +
+
+  # Layer 1: States
+  geom_line(data = df_states, aes(x = Date, y = AffordLevel, color = Entity), 
+            size = 1.2, alpha = 0.8) +
+  
+  # Layer 2: National Average
+  geom_line(data = df_us, aes(x = Date, y = AffordLevel, linetype = "National Average"), 
+            color = "black", size = 2) +
+  
+  # Labels
+  labs(
+    title = "Regional Heterogeneity in Housing Affordability",
+    y = "Affordability Gap Index",
+    x = "Calendar Year",
+    color = "Selected Regions", 
+    linetype = "Benchmark"
+  ) +
+  
+  scale_color_manual(values = my_colors) +
+  scale_linetype_manual(values = c("National Average" = "solid")) +
+  
+  # Theme Adjustments
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 18, margin = margin(b = 15), hjust = 0.5),
+    
+    axis.title.y = element_text(face = "bold", size = 14, margin = margin(r = 15)),
+    axis.title.x = element_text(face = "bold", size = 14, margin = margin(t = 15)),
+    axis.text = element_text(size = 14, color = "black"),
+    
+    legend.position = "bottom",
+    legend.box = "horizontal",
+    
+    legend.title = element_text(face = "bold", size = 14),
+    legend.text = element_text(size = 13),
+    legend.key.width = unit(1.2, "cm"),
+    
+    legend.margin = margin(t = 10),
+    
+    plot.margin = margin(t = 20, r = 20, b = 20, l = 20, unit = "pt")
+  )
+
+print(p)
+
+```
+
+## 4. Tests
+### 4.1 t-tests
+```{r}
+# Load Data
+df <- read_csv("data_part/housing_affordability_monthly_final.csv")
+
+library(dplyr)
+df_group <- df %>% group_by(period) %>%
+    summarise(home_aff = mean(home_aff),
+              rent_aff = mean(rent_aff))
+print(df_group)
+
+# HomeAff: 2000–2007 vs 2020–2025
+early  <- df$home_aff[df$period=="2000-2007"]
+recent <- df$home_aff[df$period=="2020-2025"]
+t.test(early, recent, var.equal=FALSE)
+
+# RentAff: 2013–2019 vs 2020–2025
+mid    <- df$rent_aff[df$period=="2014-2019"]
+recent <- df$rent_aff[df$period=="2020-2025"]
+t.test(mid, recent, var.equal=FALSE)
+```
+```{r}
+# ANOVA + Tukey HSD
+anova_res <- aov(home_aff ~ period, data = df)
+summary(anova_res)
+TukeyHSD(anova_res)
+
+if (!require("tidyverse")) install.packages("tidyverse")
+library(tidyverse)
+
+# 1. Load Data
+df <- read_csv("data_part/housing_affordability_monthly_final.csv")
+
+# 2. Reorder 'period' to ensure chronological order on the x-axis
+# This step is critical; otherwise, R may sort factor levels alphabetically,
+# placing "2000-2007" after "2020-2025"
+# Adjust the level order below to match the actual labels in your data
+df$period <- factor(
+  df$period,
+  levels = c("2000-2007", "2008-2013", "2014-2019", "2020-2025")
+)
+
+# 3. Plotting
+p_box <- ggplot(df, aes(x = period, y = home_aff)) +
+  
+  # Boxplot Layer
+  # fill = "skyblue": light blue fill
+  # color = "black": black box outline for better contrast
+  geom_boxplot(
+    fill = "skyblue",
+    color = "black",
+    outlier.shape = 1,
+    outlier.size = 3
+  ) +
+  
+  # Labels
+  labs(
+    title = "Home Affordability Distribution Across Regimes",
+    x = "Economic Regime",   # Improved x-axis label
+    y = "Home Affordability Index"
+  ) +
+  
+  # Theme Adjustments (Matching Previous Style)
+  theme_minimal(base_size = 16) +
+  theme(
+    # 1. Centered and enlarged title
+    plot.title = element_text(
+      face = "bold",
+      size = 22,
+      margin = margin(b = 15),
+      hjust = 0.5
+    ),
+    
+    # 2. Enlarged axis titles
+    axis.title = element_text(face = "bold", size = 20),
+    axis.title.x = element_text(margin = margin(t = 15)),
+    axis.title.y = element_text(margin = margin(r = 15)),
+    
+    # 3. Enlarged axis tick labels
+    axis.text = element_text(size = 18, color = "black"),
+    
+    # Slight rotation of x-axis labels to prevent overlap
+    # Optional: remove angle = 15 if labels are short
+    axis.text.x = element_text(angle = 0, hjust = 0.5),
+    
+    # 4. Axis tick marks
+    axis.ticks = element_line(color = "black", size = 1),
+    axis.ticks.length = unit(0.25, "cm"),
+    
+    # 5. Panel styling: no grid lines + black border
+    panel.grid = element_blank(),
+    panel.border = element_rect(color = "black", fill = NA, size = 1.5),
+    
+    # 6. Plot margins
+    plot.margin = margin(20, 20, 20, 20)
+  )
+
+# 4. Save Output
+# Note: the object name is p_box, and the file name reflects the boxplot content
+ggsave(
+  "HomeAff_Boxplot_Regimes_Styled.png",
+  plot = p_box,
+  width = 14,
+  height = 9,
+  dpi = 300
+)
+
+print(p_box)
+
+```
+
+### 4.2 Chi-square test
+```{r}
+rate_median <- median(df$mortgage_rate)
+df$rate_high <- ifelse(df$mortgage_rate > rate_median, 1, 0)
+
+cont_table <- table(df$rate_high, df$home_aff_high)
+cont_table
+
+chisq.test(cont_table)
+
+df_heat <- as.data.frame(cont_table)
+colnames(df_heat) <- c("rate_high","home_aff_high","count")
+
+ggplot(df_heat, aes(x=home_aff_high, y=rate_high, fill=count)) +
+    geom_tile() +
+    geom_text(aes(label=count), color="white") +
+    scale_fill_gradient(low="lightblue", high="navy") +
+    labs(title="Heatmap of High Rate vs High HomeAff",
+         x="High HomeAff (1 = unaffordable)",
+         y="High Rate (1 = yes)")
+```
+
+### 4.3 Bootstrap (Mean Difference & Correlation)
+```{r}
+
+
+# Mean Diff
+set.seed(123)
+
+early  <- df$home_aff[df$period=="2000-2007"]
+recent <- df$home_aff[df$period=="2020-2025"]
+
+B <- 5000
+boot_diff <- numeric(B)
+
+for (i in 1:B) {
+    boot_diff[i] <- mean(sample(recent, replace=TRUE)) -
+                    mean(sample(early, replace=TRUE))
+}
+
+hist(boot_diff, breaks=40, col="skyblue",
+     main="Bootstrap Distribution of Mean Difference",
+     xlab="Mean Difference")
+lines(density(boot_diff), col="blue", lwd=2)
+
+mean_diff <- mean(boot_diff)
+ci <- quantile(boot_diff, c(0.025, 0.975))
+se <- sd(boot_diff)
+bias <- mean_diff - (mean(recent)-mean(early))
+
+list(mean_diff=mean_diff, CI=ci, SE=se, bias=bias)
+```
+
+### 4.4 Bootstrap Correlation (Mortgage vs HomeAff)
+```{r}
+set.seed(123)
+
+B <- 5000
+boot_corr <- numeric(B)
+
+for (i in 1:B) {
+    idx <- sample(1:nrow(df), replace=TRUE)
+    boot_corr[i] <- cor(df$mortgage_rate[idx], df$home_aff[idx])
+}
+
+hist(boot_corr, breaks=40, col="skyblue",
+     main="Bootstrap Distribution of Correlation",
+     xlab="Correlation")
+lines(density(boot_corr), col="blue", lwd=2)
+
+list(
+    original = cor(df$mortgage_rate, df$home_aff),
+    mean_corr = mean(boot_corr),
+    CI = quantile(boot_corr, c(0.025, 0.975)),
+    SE = sd(boot_corr),
+    bias = mean(boot_corr) - cor(df$mortgage_rate, df$home_aff)
+)
+```
+
+## 5. ARIMA Process
+```{r}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(tidyverse)
+library(lubridate)
+library(forecast)
+library(tseries)
+library(gridExtra)
+library(knitr)
+library(kableExtra)
+library(astsa) 
+library(ggplot2)
+library(gridExtra)
+library(lubridate)
+library(zoo) 
+
+# 1. Data Loading & Preprocessing
+df <- read.csv("data_part/housing_affordability_monthly_final.csv")
+
+# Date conversion
+df$date <- as.Date(paste0(df$date, "-01"))
+
+# Create Time Series Objects (Frequency = 12 for monthly data)
+# Start date extraction
+start_year <- year(min(df$date))
+start_month <- month(min(df$date))
+
+ts_home <- ts(df$home_aff, start = c(start_year, start_month), frequency = 12)
+ts_rent <- ts(df$rent_aff, start = c(start_year, start_month), frequency = 12)
+
+# Remove NA if any
+ts_home <- na.omit(ts_home)
+ts_rent <- na.omit(ts_rent)
+```
+
+```{r}
+# 1. Update Theme Settings (with 45-degree rotated x-axis labels)
+theme_large <- theme_bw() + 
+  theme(
+    # Plot title settings
+    plot.title = element_text(size = 22, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 16, color = "gray40", hjust = 0.5),
+    
+    # Axis title settings
+    axis.title.x = element_text(size = 18, face = "bold", margin = margin(t = 15)),
+    axis.title.y = element_text(size = 18, face = "bold", margin = margin(r = 15)),
+    
+    # Axis tick labels (general settings)
+    axis.text = element_text(size = 15, color = "black"),
+    
+    # Key modification: rotate x-axis tick labels by 45 degrees
+    # angle = 45: rotate labels by 45 degrees
+    # hjust = 1: right-align labels (critical to align text with tick marks)
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    
+    # Plot margins (extra bottom margin for rotated labels)
+    plot.margin = margin(20, 20, 20, 20),
+    
+    # Remove minor grid lines
+    panel.grid.minor = element_blank()
+  )
+
+# Generate monthly date sequence matching the time series length
+dates_seq <- seq(
+  from = as.Date(paste0(start(ts_home)[1], "-", start(ts_home)[2], "-01")),
+  by = "month",
+  length.out = length(ts_home)
+)
+
+# Perform multiplicative time series decomposition
+decomp_home <- decompose(ts_home, type = "multiplicative")
+
+# Convert decomposition results into a data frame
+df_decomp <- data.frame(
+  Date = dates_seq,
+  Trend = as.numeric(decomp_home$trend),
+  Seasonal = as.numeric(decomp_home$seasonal),
+  Random = as.numeric(decomp_home$random)
+)
+
+# Plot 1: Trend Component
+p_trend <- ggplot(df_decomp, aes(x = Date, y = Trend)) +
+  geom_line(color = "darkblue", size = 1.2) +
+  # Slightly denser x-axis ticks; rotated labels allow more room
+  scale_x_date(breaks = date_breaks("2 years"), labels = date_format("%Y")) +
+  labs(
+    title = "Long-Term Trend Component",
+    subtitle = "Home Affordability",
+    x = "Calendar Year",
+    y = "Trend Index Value"
+  ) +
+  theme_large
+
+# Plot 2: Seasonal Component
+p_seasonal <- ggplot(df_decomp, aes(x = Date, y = Seasonal)) +
+  geom_line(color = "darkblue", size = 1) +
+  scale_x_date(breaks = date_breaks("2 years"), labels = date_format("%Y")) +
+  labs(
+    title = "Seasonal Component",
+    subtitle = "Home Affordability",
+    x = "Calendar Year",
+    y = "Seasonal Factor"
+  ) +
+  theme_large
+
+# Plot 3: Remainder / Residual Component
+p_random <- ggplot(df_decomp, aes(x = Date, y = Random)) +
+  geom_line(color = "darkblue", size = 0.8) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red", size = 1) +
+  scale_x_date(breaks = date_breaks("2 years"), labels = date_format("%Y")) +
+  labs(
+    title = "Residual Component",
+    subtitle = "Home Affordability",
+    x = "Calendar Year",
+    y = "Residual Factor"
+  ) +
+  theme_large
+
+# Output plots
+print(p_trend)
+print(p_seasonal)
+print(p_random)
+
+# Save plots to files
+ggsave("Decomposition_1_Trend.png", plot = p_trend, width = 8, height = 5, dpi = 300)
+ggsave("Decomposition_2_Seasonal.png", plot = p_seasonal, width = 8, height = 5, dpi = 300)
+ggsave("Decomposition_3_Residual.png", plot = p_random, width = 8, height = 5, dpi = 300)
+
+```
+
+```{r}
+library(ggplot2)
+library(forecast)
+
+# Define Large-Font Theme (unchanged)
+theme_large_plots <- theme_bw() +
+  theme(
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 15, color = "gray40", hjust = 0.5),
+    axis.title = element_text(size = 16, face = "bold"),
+    axis.text = element_text(size = 14, color = "black"),
+    strip.text = element_text(size = 14, face = "bold"),
+    plot.margin = margin(15, 15, 15, 15)
+  )
+
+# 1. Corrected Lag Plot (restore color encoding)
+# Key point: removed geom_point(color = "darkblue")
+# gglagplot automatically colors points by month (default rainbow palette)
+
+p_lag <- gglagplot(ts_home, lags = 9, do.lines = FALSE) +
+  
+  # Descriptive labels and units
+  labs(
+    title = "Lag Plots: Autocorrelation Structure",
+    subtitle = "Home Affordability",
+    x = "Previous Affordability Index Value (t-k)",
+    y = "Current Affordability Index Value (t)"
+  ) +
+  
+  # Apply large-font theme
+  theme_large_plots +
+  
+  # Prevent x-axis label overlap and improve legend readability
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    
+    # Increase legend text size for clearer color distinction
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 14, face = "bold")
+  ) +
+  
+  # Increase legend point size for better visibility (optional)
+  # This overrides the legend aesthetics without changing the plot itself
+  guides(colour = guide_legend(override.aes = list(size = 3)))
+
+# 2. ACF Plot (unchanged)
+p_acf <- ggAcf(ts_home, lag.max = 24) +
+  labs(
+    title = "Autocorrelation Function of Raw Data",
+    subtitle = "Home Affordability",
+    x = "Lag",
+    y = "Autocorrelation Coefficient"
+  ) +
+  theme_large_plots +
+  theme(
+    panel.grid.major.y = element_line(size = 1)
+  )
+
+# Output
+print(p_lag)
+print(p_acf)
+```
+
+
+```{r}
+# Augmented
+dates_diff <- df$date[-1]
+
+ts_home_diff <- diff(ts_home, differences = 1)
+
+df_diff_plot <- data.frame(
+  Date = dates_diff,
+  Diff_Value = as.numeric(ts_home_diff)
+)
+
+# 2. Define Large-Font Theme (Large Fonts Theme)
+# Includes 45-degree rotated x-axis labels to prevent overlap
+theme_large_diff <- theme_bw() +
+  theme(
+    # Plot titles (size 20+, bold)
+    plot.title = element_text(size = 22, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 16, color = "gray40", hjust = 0.5),
+    
+    # Axis titles (size 18+)
+    axis.title.x = element_text(size = 18, face = "bold", margin = margin(t = 15)),
+    axis.title.y = element_text(size = 18, face = "bold", margin = margin(r = 15)),
+    
+    # Axis tick labels (size 15+, rotated to avoid overlap)
+    axis.text.x = element_text(size = 15, color = "black", angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 15, color = "black"),
+    
+    # Plot margins
+    plot.margin = margin(20, 20, 20, 20),
+    
+    # Remove minor grid lines
+    panel.grid.minor = element_blank()
+  )
+
+# 3. Plot First-Order Differenced Series
+p_diff <- ggplot(df_diff_plot, aes(x = Date, y = Diff_Value)) +
+  
+  # B. Differenced time series line (distinct color for clarity)
+  geom_line(color = "darkblue", size = 1) +
+  
+  # A. Zero reference line (critical for assessing stationarity)
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red", size = 1.2) +
+  
+  # C. Time axis formatting
+  scale_x_date(breaks = date_breaks("2 years"), labels = date_format("%Y")) +
+  
+  # D. Descriptive labels and units
+  labs(
+    title = "First-Order Differenced Home Affordability",
+    x = "Calendar Year",
+    y = "Change in Index Value"
+  ) +
+  
+  # E. Apply large-font theme
+  theme_large_diff
+
+# Output
+print(p_diff)
+
+# Augmented Dickey-Fuller (ADF) test on differenced series
+print(adf.test(ts_home_diff))
+
+```
+
+```{r}
+library(ggplot2)
+library(forecast)
+
+# 1. Define Large-Font Theme (Large Fonts Theme)
+theme_large_acf <- theme_bw() +
+  theme(
+    # Plot titles (size 20+, bold)
+    plot.title = element_text(size = 20, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 15, color = "gray40", hjust = 0.5),
+    
+    # Axis titles (size 16+)
+    axis.title = element_text(size = 16, face = "bold"),
+    
+    # Axis tick labels (size 14+, prevent overlap)
+    # Even simple numeric labels (1, 2, 3, …) may overlap at large font sizes,
+    # so a 45-degree rotation is retained for safety
+    axis.text.x = element_text(size = 14, color = "black", hjust = 1),
+    axis.text.y = element_text(size = 14, color = "black"),
+    
+    # Emphasize horizontal reference grid lines (y = 0)
+    panel.grid.major.y = element_line(size = 1),
+    
+    # Plot margins
+    plot.margin = margin(15, 15, 15, 15)
+  )
+
+# 2. Plot ACF (used to identify MA terms – q)
+p_acf_diff <- ggAcf(ts_home_diff, lag.max = 24) +
+  
+  # Descriptive labels and units
+  labs(
+    title = "ACF of Differenced Data",
+    subtitle = "Home Affordability",
+    x = "Lag",
+    y = "Correlation Coefficient (r)"
+  ) +
+  
+  # Apply large-font theme
+  theme_large_acf
+
+# 3. Plot PACF (used to identify AR terms – p)
+p_pacf_diff <- ggPacf(ts_home_diff, lag.max = 24) +
+  
+  # Descriptive labels and units
+  labs(
+    title = "PACF of Differenced Data",
+    subtitle = "Home Affordability",
+    x = "Lag",
+    y = "Partial Correlation Coefficient"
+  ) +
+  
+  # Apply large-font theme
+  theme_large_acf
+
+# 4. Output
+print(p_acf_diff)
+print(p_pacf_diff)
+
+
+```
+
+```{r}
+# Manual Model Selection (SARIMA Candidates)
+# Since we observed seasonality in decomposition, we must include 'seasonal' arguments.
+# We fit these to the raw data (ts_home) as decided.
+
+# Model 1: The "Airline Model" (Classic for trend + season)
+# ARIMA(0,1,1)(0,1,1)[12]
+m1 <- Arima(ts_home, order=c(0,1,1), seasonal=c(0,1,1))
+
+# Model 2: Seasonal AR Model (Focus on autoregression)
+# ARIMA(1,1,0)(1,0,0)[12]
+m2 <- Arima(ts_home, order=c(1,1,0), seasonal=c(1,0,0))
+
+# Model 3: Mixed Model
+# ARIMA(1,1,1)(0,1,1)[12]
+m3 <- Arima(ts_home, order=c(1,1,1), seasonal=c(0,1,1)) 
+
+# AIC/BIC Comparison Table
+model_comp <- data.frame(
+  Model = c("ARIMA(0,1,1)(0,1,1)[12]", "ARIMA(1,1,0)(1,0,0)[12]", "ARIMA(1,1,1)(0,1,1)[12]"),
+  AIC = c(m1$aic, m2$aic, m3$aic),
+  BIC = c(m1$bic, m2$bic, m3$bic)
+)
+
+# Display table
+kable(model_comp, caption = "Manual SARIMA Model Comparison") %>% kable_styling()
+```
+
+
+
+```{r}
+# Auto ARIMA & Full Diagnostics
+
+# 1. Run Auto ARIMA
+auto_fit <- auto.arima(ts_home, seasonal = TRUE, stepwise = FALSE, approximation = FALSE)
+print(summary(auto_fit))
+
+# 2. Extract orders robustly
+ord <- arimaorder(auto_fit)
+
+# Check if the model has seasonal components (length > 3)
+if (length(ord) > 3) {
+  # Seasonal Model Found: Use extracted P, D, Q
+  p <- ord[1]; d <- ord[2]; q <- ord[3]
+  P <- ord[4]; D <- ord[5]; Q <- ord[6]
+} else {
+  # Non-seasonal Model Found: Force Seasonal parts to 0
+  p <- ord[1]; d <- ord[2]; q <- ord[3]
+  P <- 0;      D <- 0;      Q <- 0
+}
+
+cat("Diagnosing Model -> ", 
+    "ARIMA(", p, ",", d, ",", q, ")(", P, ",", D, ",", Q, ")[12]\n", sep="")
+
+# 3. Full Diagnostics using sarima()
+# Now passing safe, non-NA variables
+sarima(ts_home, p, d, q, P, D, Q, 12)
+```
+
+
+```{r}
+### Benchmarking (ARIMA vs. Seasonal Naive)
+# Revised version: ensure date formats are consistent to avoid transform_date errors
+
+# Ensure the zoo package is available for time-series date handling
+if (!require(zoo)) install.packages("zoo")
+library(zoo)
+
+# 1. Split Data (Train / Test)
+h_step <- 12
+
+train_set <- head(ts_home, length(ts_home) - h_step)
+test_set  <- tail(ts_home, h_step)
+
+# 2. Fit Models
+fit_arima_train <- Arima(train_set, order = c(0, 1, 1), seasonal = c(0, 1, 1))
+fc_arima <- forecast(fit_arima_train, h = h_step)
+
+fit_snaive <- snaive(train_set, h = h_step)
+
+# 3. Calculate Accuracy Metrics
+acc_arima  <- accuracy(fc_arima, test_set)
+acc_snaive <- accuracy(fit_snaive, test_set)
+
+res_table <- rbind(
+  "SARIMA (0,1,1)(0,1,1)" = acc_arima[2, c("RMSE", "MAE", "MAPE")],
+  "Benchmark (SNaive)"    = acc_snaive[2, c("RMSE", "MAE", "MAPE")]
+)
+
+kable(res_table, caption = "Model Performance Comparison") %>%
+  kable_styling(full_width = FALSE)
+
+# 4. Visualization (Fixing the Date Conversion Issue)
+# [Key fix]: use as.Date(time(...)) to convert decimal time indices
+# into proper Date objects
+
+df_test <- data.frame(
+  Date   = as.Date(time(test_set)),
+  Actual = as.numeric(test_set)
+)
+
+df_arima <- data.frame(
+  Date     = as.Date(time(fc_arima$mean)),
+  Forecast = as.numeric(fc_arima$mean)
+)
+
+df_snaive <- data.frame(
+  Date     = as.Date(time(fit_snaive$mean)),
+  Forecast = as.numeric(fit_snaive$mean)
+)
+
+# Define theme for benchmarking visualization
+theme_bench <- theme_bw() +
+  theme(
+    plot.title = element_text(size = 20, face = "bold"),
+    legend.position = "bottom",
+    legend.text = element_text(size = 14),
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 14, face = "bold")
+  )
+
+# Note: Instead of using autoplot(ts),
+# we directly construct the plot from data frames.
+# This approach is more robust and avoids date-related errors.
+
+ggplot() +
+  # Plot historical data (last 3 years only)
+  geom_line(
+    data = data.frame(
+      Date  = as.Date(time(window(ts_home, start = end(ts_home)[1] - 3))),
+      Value = as.numeric(window(ts_home, start = end(ts_home)[1] - 3))
+    ),
+    aes(x = Date, y = Value),
+    color = "black",
+    size = 0.8
+  ) +
+  
+  # Plot forecast lines
+  geom_line(
+    data = df_arima,
+    aes(x = Date, y = Forecast, color = "SARIMA Forecast"),
+    size = 1.2
+  ) +
+  geom_line(
+    data = df_snaive,
+    aes(x = Date, y = Forecast, color = "SNaive Benchmark"),
+    size = 1.2
+  ) +
+  
+  # Plot actual test observations
+  geom_point(
+    data = df_test,
+    aes(x = Date, y = Actual),
+    color = "black",
+    size = 2
+  ) +
+  
+  labs(
+    title = "Benchmarking: SARIMA vs. Seasonal Naive",
+    subtitle = "Comparing forecast accuracy over the last 12 months",
+    y = "Home Affordability Index",
+    x = "Year"
+  ) +
+  
+  # Explicit color and date formatting
+  scale_color_manual(
+    values = c(
+      "SARIMA Forecast"   = "red",
+      "SNaive Benchmark"  = "blue"
+    )
+  ) +
+  scale_x_date(date_labels = "%Y", date_breaks = "1 year") +
+  
+  theme_bench
+
+
+```
+
+```{r}
+### Final Forecast & Interpretation (Updated for 95% & 99% CI)
+
+# 1. Refit the Best Model on the FULL Dataset
+final_model <- Arima(ts_home, order = c(0, 1, 1), seasonal = c(0, 1, 1))
+
+# 2. Forecast Future Values with 95% and 99% Confidence Intervals
+# Key modification: specify multiple confidence levels using level = c(95, 99)
+final_fc <- forecast(final_model, h = 6, level = c(95, 99))
+
+# 3. Prepare Forecast Data for Plotting
+df_final_fc <- data.frame(
+  Date     = as.Date(time(final_fc$mean)),
+  Forecast = as.numeric(final_fc$mean),
+  
+  # When level = c(95, 99),
+  # the first column typically corresponds to 95%,
+  # and the second column corresponds to 99%
+  Lower95 = as.numeric(final_fc$lower[, 1]),
+  Upper95 = as.numeric(final_fc$upper[, 1]),
+  
+  Lower99 = as.numeric(final_fc$lower[, 2]),
+  Upper99 = as.numeric(final_fc$upper[, 2])
+)
+
+# Extract recent historical data (last 2 years) to connect with the forecast
+recent_hist <- window(ts_home, start = end(ts_home)[1] - 2)
+
+df_hist <- data.frame(
+  Date  = as.Date(time(recent_hist)),
+  Value = as.numeric(recent_hist)
+)
+
+ggplot() +
+  
+  # 1. Confidence Intervals
+  geom_ribbon(
+    data = df_final_fc,
+    aes(x = Date, ymin = Lower99, ymax = Upper99, fill = "99% Confidence Interval"),
+    alpha = 0.3
+  ) +
+  geom_ribbon(
+    data = df_final_fc,
+    aes(x = Date, ymin = Lower95, ymax = Upper95, fill = "95% Confidence Interval"),
+    alpha = 0.5
+  ) +
+  
+  # 2. Historical Data Line
+  geom_line(
+    data = df_hist,
+    aes(x = Date, y = Value, color = "Historical Data"),
+    size = 1
+  ) +
+  
+  # 3. Forecast Mean Line
+  geom_line(
+    data = df_final_fc,
+    aes(x = Date, y = Forecast, color = "Forecast Mean"),
+    size = 1.2
+  ) +
+  
+  # 4. Aesthetic Mappings
+  scale_color_manual(
+    name = "Legend",
+    values = c(
+      "Historical Data" = "black",
+      "Forecast Mean"   = "blue"
+    )
+  ) +
+  scale_fill_manual(
+    name = "Uncertainty",
+    values = c(
+      "99% Confidence Interval" = "gray80",
+      "95% Confidence Interval" = "gray60"
+    )
+  ) +
+  
+  # 5. Labels and Theme
+  labs(
+    title = "Final Forecast of Home Affordability",
+    y = "Home Affordability Index Value",
+    x = "Year"
+  ) +
+  scale_x_date(date_labels = "%Y-%m", date_breaks = "6 months") +
+  
+  theme_bw() +
+  theme(
+    plot.title = element_text(size = 22, face = "bold", hjust = 0.5),
+    plot.subtitle = element_text(size = 16, color = "gray40", hjust = 0.5),
+    axis.title = element_text(size = 18, face = "bold"),
+    axis.text = element_text(size = 14),
+    
+    # Key legend layout adjustments
+    legend.position = "bottom",
+    
+    # Stack legend groups vertically
+    legend.box = "vertical",
+    
+    # Center-align legend boxes
+    legend.box.just = "center",
+    
+    legend.title = element_text(size = 14, face = "bold"),
+    legend.text = element_text(size = 12),
+    
+    # Increase spacing between legend groups
+    legend.spacing.y = unit(0.2, "cm"),
+    legend.margin = margin(t = 10)
+  )
+
+```
+
+## 6. Time-Series
+```{r}
+# Joint Dynamics of Home vs Rent Affordability
+library(dplyr)
+library(ggplot2)
+library(scales)
+library(lubridate)
+library(tidyr)
+library(urca)
+library(broom)
+
+# Load updated dataset
+df <- read.csv("data_part/housing_affordability_monthly_final.csv")
+```
+
+```{r}
+# Convert date column (already YYYY-MM-DD format)
+df$date <- as.Date(df$date)
+```
+
+```{r}
+# Standardize affordability indexes (z-scores)
+df <- df %>%
+  mutate(
+    home_aff_z = as.numeric(scale(home_aff)),
+    rent_aff_z = as.numeric(scale(rent_aff))
+  )
+
+
+```
+
+```{r}
+# Joint Dynamics Plot
+joint_dynamics <- ggplot(df, aes(x = date)) +
+  geom_line(aes(y = home_aff_z, color = "Home Affordability"), linewidth = 1.1) +
+  geom_line(aes(y = rent_aff_z, color = "Rent Affordability"), linewidth = 1.1) +
+  
+  geom_vline(xintercept = as.Date("2008-09-01"),
+             linetype = "dashed", color = "black", alpha = 0.7) +
+  geom_vline(xintercept = as.Date("2020-03-01"),
+             linetype = "dashed", color = "black", alpha = 0.7) +
+  geom_vline(xintercept = as.Date("2022-06-01"),
+             linetype = "dashed", color = "black", alpha = 0.7) +
+  
+  annotate("text", x = as.Date("2008-09-01") - 120,
+          y = max(df$home_aff_z, na.rm = TRUE) * 0.95,
+          label = "Housing Crash", angle = 90, size = 3, hjust = 1) +
+  annotate("text", x = as.Date("2020-03-01") - 120,
+          y = max(df$home_aff_z, na.rm = TRUE) * 0.95,
+          label = "COVID Shock", angle = 90, size = 3, hjust = 1) +
+  annotate("text", x = as.Date("2022-06-01") - 120,
+          y = max(df$home_aff_z, na.rm = TRUE) * 0.95,
+          label = "Mortgage Rate Spike", angle = 90, size = 3, hjust = 1) +
+  
+  labs(
+    title = "Joint Dynamics of Home vs Rent Affordability",
+    subtitle = "Both series standardized (z-scores) for comparability",
+    x = "Date",
+    y = "Standardized Affordability (z-score)",
+    color = ""
+  ) +
+  scale_color_manual(values = c(
+    "Home Affordability" = "#1B76D1",
+    "Rent Affordability" = "#D14B1B"
+  )) +
+  scale_x_date(date_labels = "%Y", date_breaks = "3 years") +
+  theme_minimal(base_size = 15)
+
+print(joint_dynamics)
+
+
+```
+
+```{r}
+# Prepare differenced series (dh, dr)
+h <- na.omit(df$home_aff)
+r <- na.omit(df$rent_aff)
+
+dh <- diff(h)
+dr <- diff(r)
+
+# ADF Tests
+adf_home <- ur.df(df$home_aff, type = "drift", selectlags = "AIC")
+adf_rent <- ur.df(df$rent_aff, type = "drift", selectlags = "AIC")
+
+cat("\nADF Test for HomeAff (level):\n")
+summary(adf_home)
+
+cat("\nADF Test for RentAff (level):\n")
+summary(adf_rent)
+
+# Differenced ADF
+adf_dh <- ur.df(dh, type = "drift", selectlags = "AIC")
+adf_dr <- ur.df(dr, type = "drift", selectlags = "AIC")
+
+cat("\nADF Test for Differenced HomeAff:\n")
+summary(adf_dh)
+
+cat("\nADF Test for Differenced RentAff:\n")
+summary(adf_dr)
+
+
+
+```
+
+```{r}
+# Use z-scored affordability (trend-preserving)
+h <- df$home_aff_z
+r <- df$rent_aff_z
+
+# Remove NA in case early periods differ
+valid <- complete.cases(h, r)
+h <- h[valid]
+r <- r[valid]
+
+# Compute CCF on level series
+cc <- ccf(h, r, plot = FALSE, lag.max = 24)
+
+cc_df <- data.frame(
+  lag = cc$lag,
+  ccf = cc$acf
+)
+
+# Significance threshold (same formula)
+crit <- 2 / sqrt(length(h))
+
+# Plot
+p2 <- ggplot(cc_df, aes(x = lag, y = ccf)) +
+  geom_hline(yintercept = 0, color = "gray40") +
+  geom_segment(
+    aes(x = lag, xend = lag, y = 0, yend = ccf),
+    linewidth = 0.9, color = "#3366CC"
+  ) +
+  geom_hline(yintercept = crit,
+             linetype = "dashed", color = "red", linewidth = 0.6) +
+  geom_hline(yintercept = -crit,
+             linetype = "dashed", color = "red", linewidth = 0.6) +
+  labs(
+    title = "Cross-Correlation of HomeAff & RentAff (Level Series)",
+    subtitle = "Negative lags → RentAff leads HomeAff",
+    x = "Lag (months)",
+    y = "Cross-Correlation"
+  ) +
+  theme_minimal(base_size = 15)
+
+print(p2)
+```
+
+```{r}
+# Cross-lag regression (Rent leads Home)
+lag_df <- data.frame(
+  dh = dh,
+  dr_lag1 = dplyr::lag(dr, 1),
+  dr_lag2 = dplyr::lag(dr, 2),
+  dr_lag3 = dplyr::lag(dr, 3),
+  dr_lag6 = dplyr::lag(dr, 6),
+  dr_lag9 = dplyr::lag(dr, 9),
+  dr_lag12 = dplyr::lag(dr, 12)
+)
+
+lag_df <- na.omit(lag_df)
+
+model_rent_leads <- lm(dh ~ dr_lag1 + dr_lag2 + dr_lag3 +
+                           dr_lag6 + dr_lag9 + dr_lag12,
+                       data = lag_df)
+
+summary(model_rent_leads)
+
+# Cross-lag regression (Home leads Rent)
+lag_df2 <- data.frame(
+  dr = dr,
+  dh_lag1 = dplyr::lag(dh, 1),
+  dh_lag2 = dplyr::lag(dh, 2),
+  dh_lag3 = dplyr::lag(dh, 3),
+  dh_lag6 = dplyr::lag(dh, 6),
+  dh_lag9 = dplyr::lag(dh, 9),
+  dh_lag12 = dplyr::lag(dh, 12)
+)
+
+lag_df2 <- na.omit(lag_df2)
+
+model_home_leads <- lm(dr ~ dh_lag1 + dh_lag2 + dh_lag3 +
+                           dh_lag6 + dh_lag9 + dh_lag12,
+                       data = lag_df2)
+
+summary(model_home_leads)
+
+# Coefficient plot (Rent leads Home)
+coef_df <- broom::tidy(model_rent_leads) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    lag = as.numeric(gsub("dr_lag", "", term)),
+    signif = p.value < 0.05
+  )
+
+ggplot(coef_df, aes(x = lag, y = estimate)) +
+  geom_col(fill = "#3366CC") +
+  geom_point(aes(color = signif), size = 4) +
+  scale_color_manual(values = c("black", "red")) +
+  geom_hline(yintercept = 0, color = "gray40") +
+  labs(
+    title = "Cross-Lag Regression Coefficients (Rent leads Home)",
+    subtitle = "Red = significant (p < 0.05)",
+    x = "Lag (months)",
+    y = "Coefficient"
+  ) +
+  theme_minimal(base_size = 15)
+```
+
+## 7.Regression Results
+```{r}
+## Step 0: Load packages
+
+library(tseries)
+library(lmtest)
+library(knitr)
+library(ggplot2)
+library(broom)
+
+## Step 1: Read and prepare data
+
+# Read final dataset
+housing <- read.csv("data_part/housing_affordability_monthly_final.csv",
+                    stringsAsFactors = FALSE)
+
+# Original date is "YYYY-MM" → add "-01" to create a proper Date
+housing$date <- as.Date(paste0(housing$date, "-01"))
+
+# Make sure data are sorted by time
+housing <- housing[order(housing$date), ]
+
+# Quick check of key variables
+str(housing[, c("home_aff", "mortgage_rate", "wage_income")])
+summary(housing[, c("home_aff", "mortgage_rate", "wage_income")])
+
+## Step 2: Check if linear regression is roughly appropriate
+## Goal: See whether home_aff roughly has linear relationships
+## with mortgage_rate and wage_income.
+
+# Pairwise scatterplots
+par(mfrow = c(1, 2),
+    mar = c(4.5, 4.5, 3, 1),
+    oma = c(0, 0, 4, 0))
+
+pt_col <- rgb(0.4, 0.4, 0.4, alpha = 0.7)
+
+# (a) vs mortgage rate
+plot(housing$mortgage_rate, housing$rent_aff,
+     pch = 16, cex = 1, col = pt_col,
+     xlab = "Mortgage rate (%)",
+     ylab = "Home affordability index",
+     main = "Home Affordability vs Mortgage Rate",
+     cex.main = 0.9,
+     cex.lab = 1.2,
+     cex.axis = 1,
+     bty = "l")
+grid(col = "grey85")
+abline(lm(home_aff ~ mortgage_rate, data = housing),
+       col = "red", lwd = 2)
+
+# (b) vs real wages
+plot(housing$wage_income, housing$home_aff,
+     pch = 16, cex = 1, col = pt_col,
+     xlab = "Real wage index",
+     ylab = "Home affordability index",
+     main = "Home Affordability vs Real Wages",
+     cex.main = 0.9,
+     cex.lab = 1.2,
+     cex.axis = 1,
+     bty = "l")
+grid(col = "grey85")
+abline(lm(home_aff ~ wage_income, data = housing),
+       col = "blue", lwd = 2)
+
+# Overall title
+mtext("Home Affordability vs Mortgage Rate and Real Wages",
+      outer = TRUE, cex = 1.5, font = 2)
+
+par(mfrow = c(1, 1), oma = c(0,0,0,0))
+
+# Pearson correlation matrix
+cor(housing[, c("home_aff", "mortgage_rate", "wage_income")])
+
+## Step 3: Time-series properties – ADF tests (stationarity)
+## ADF null hypothesis: series has a unit root (non-stationary).
+## If p-value < 0.05 → reject H0 → series is stationary.
+## If p-value >= 0.05 → fail to reject H0 → treat as non-stationary.
+
+adf_home <- adf.test(housing$home_aff, k = 12)
+adf_rate <- adf.test(housing$mortgage_rate, k = 12)
+adf_wage <- adf.test(housing$wage_income, k = 12)
+
+adf_home
+adf_rate
+adf_wage
+
+## Step 4: Fit the main OLS regression
+## Dependent variable: home_aff (housing affordability index)
+## Key regressors: mortgage_rate, wage_income
+## This is a simple association, not a causal structural model.
+
+mod_home <- lm(home_aff ~ mortgage_rate + wage_income,
+               data = housing)
+
+summary(mod_home)
+
+## Step 5: Build a clean regression table
+
+reg_sum  <- summary(mod_home)
+coef_tab <- coef(reg_sum)  # matrix with Estimate, Std. Error, t value, Pr(>|t|)
+
+# Extract R-squared and adjusted R-squared
+r2     <- reg_sum$r.squared
+adj_r2 <- reg_sum$adj.r.squared
+
+kable(round(coef_tab, 4),
+      caption = "Regression of home affordability on mortgage rate and wages")
+
+cat(sprintf("R-squared: %.3f\nAdjusted R-squared: %.3f\n", r2, adj_r2))
+
+## Step 6: Diagnostics for the regression model
+##  (1) Residual plots → linearity, equal variance, outliers
+##  (2) Residuals over time → any obvious patterns?
+##  (3) Autocorrelation in residuals → ACF + Durbin–Watson
+##  (4) Normality of residuals → QQ plot + Shapiro–Wilk test
+
+# 6.1 Basic residual plots (linearity, equal variance, influential points)
+# Common aesthetics (keep identical to rent)
+pt_col   <- rgb(0.4, 0.4, 0.4, 0.7)
+line_col <- "red"
+
+# Extract quantities
+fitted_home <- fitted(mod_home)
+resid_home  <- resid(mod_home)
+std_resid   <- rstandard(mod_home)
+lev         <- hatvalues(mod_home)
+
+par(mfrow = c(2, 2),
+    mar = c(4.5, 4.5, 3, 1))
+
+## (1) Residuals vs Fitted
+plot(fitted_home, resid_home,
+     pch = 16, cex = 0.9, col = pt_col,
+     xlab = "Fitted values",
+     ylab = "Residuals",
+     main = "Residuals vs Fitted",
+     bty = "l")
+grid(col = "grey85")
+lines(lowess(fitted_home, resid_home),
+      col = line_col, lwd = 2)
+abline(h = 0, lty = 2, col = "grey40")
+
+## (2) Normal Q–Q
+qqnorm(std_resid,
+       pch = 16, cex = 0.8, col = pt_col,
+       main = "Normal Q–Q",
+       xlab = "Theoretical Quantiles",
+       ylab = "Standardized residuals",
+       bty = "l")
+qqline(std_resid, col = line_col, lwd = 2)
+grid(col = "grey85")
+
+## (3) Scale–Location
+plot(fitted_home, sqrt(abs(std_resid)),
+     pch = 16, cex = 0.9, col = pt_col,
+     xlab = "Fitted values",
+     ylab = expression(sqrt("|Standardized residuals|")),
+     main = "Scale–Location",
+     bty = "l")
+grid(col = "grey85")
+lines(lowess(fitted_home, sqrt(abs(std_resid))),
+      col = line_col, lwd = 2)
+
+## (4) Residuals vs Leverage
+plot(lev, std_resid,
+     pch = 16, cex = 0.9, col = pt_col,
+     xlab = "Leverage",
+     ylab = "Standardized residuals",
+     main = "Residuals vs Leverage",
+     bty = "l")
+grid(col = "grey85")
+lines(lowess(lev, std_resid),
+      col = line_col, lwd = 2)
+abline(h = c(-2, 0, 2),
+       lty = c(2, 1, 2),
+       col = "grey40")
+
+par(mfrow = c(1, 1))
+
+res_home <- resid(mod_home)
+
+covid_start <- as.Date("2020-03-01")
+covid_end   <- as.Date("2021-12-01")
+
+par(mar = c(4.5, 4.5, 3, 1))
+
+plot(housing$date, res_home,
+     type = "n",
+     xlab = "Date",
+     ylab = "Residuals (index points)",
+     main = "Home affordability residuals over time",
+     bty = "l")
+
+grid(col = "grey90")
+
+# Highlight COVID period
+usr <- par("usr")
+rect(covid_start, usr[3], covid_end, usr[4],
+     col = rgb(1, 0, 0, 0.06), border = NA)
+
+# Emphasize structure first, noise second
+lines(housing$date, res_home,
+      col = "grey40", lwd = 1.4)
+
+points(housing$date, res_home,
+       pch = 16, cex = 0.35,
+       col = rgb(0.3, 0.3, 0.3, 0.5))
+
+abline(h = 0, lty = 2, col = "grey40")
+
+mtext("Shaded area indicates COVID-19 period",
+      side = 3, line = 0.3, adj = 1,
+      cex = 0.75, col = "grey40")
+
+# 6.3 Autocorrelation diagnostics
+acf(resid(mod_home),
+    main = "ACF of home affordability residuals",
+    xlab = "Lag (months)",
+    ylab = "Autocorrelation")
+
+# Durbin–Watson test for first-order autocorrelation
+# H0: no first-order autocorrelation in errors
+dwtest(mod_home)
+
+# 6.4 Normality diagnostics
+qqnorm(resid(mod_home),
+       main = "Normal Q–Q plot: home affordability residuals",
+       pch = 16, cex = 0.6, col = "grey40")
+qqline(resid(mod_home), col = "red", lwd = 2)
+
+# Shapiro–Wilk test of normality (large n → very sensitive)
+# H0: residuals are normally distributed
+shapiro.test(resid(mod_home))
+```
+
+```{r}
+## Step 2 (rent): Check if linear regression is roughly appropriate
+## Goal: See whether rent_aff roughly has linear relationships
+## with mortgage_rate and wage_income.
+
+# Pairwise scatterplots
+par(mfrow = c(1, 2),
+    mar = c(4.5, 4.5, 3, 1),
+    oma = c(0, 0, 4, 0))
+
+pt_col <- rgb(0.4, 0.4, 0.4, alpha = 0.7)
+
+# (a) vs mortgage rate
+plot(housing$mortgage_rate, housing$rent_aff,
+     pch = 16, cex = 1, col = pt_col,
+     xlab = "Mortgage rate (%)",
+     ylab = "Rent affordability index",
+     main = "Rent Affordability vs Mortgage Rate",
+     cex.main = 0.9,
+     cex.lab = 1.2,
+     cex.axis = 1,
+     bty = "l")
+grid(col = "grey85")
+abline(lm(rent_aff ~ mortgage_rate, data = housing),
+       col = "red", lwd = 2)
+
+# (b) vs real wages
+plot(housing$wage_income, housing$rent_aff,
+     pch = 16, cex = 1, col = pt_col,
+     xlab = "Real wage index",
+     ylab = "Rent affordability index",
+     main = "Rent Affordability vs Real Wages",
+     cex.main = 0.9,
+     cex.lab = 1.2,
+     cex.axis = 1,
+     bty = "l")
+grid(col = "grey85")
+abline(lm(rent_aff ~ wage_income, data = housing),
+       col = "blue", lwd = 2)
+
+# Overall title
+mtext("Rent Affordability vs Mortgage Rate and Real Wages",
+      outer = TRUE, cex = 1.5, font = 2)
+
+par(mfrow = c(1, 1), oma = c(0,0,0,0))
+
+
+
+# Pearson correlation matrix
+cor(housing[, c("rent_aff", "mortgage_rate", "wage_income")])
+
+
+## Step 3 (rent): Time-series properties – ADF tests (stationarity)
+## ADF null hypothesis: series has a unit root (non-stationary).
+## If p-value < 0.05 → reject H0 → series is stationary.
+## If p-value >= 0.05 → fail to reject H0 → treat as non-stationary.
+
+adf_rent <- adf.test(housing$rent_aff, k = 12)
+adf_rate <- adf.test(housing$mortgage_rate, k = 12)
+adf_wage <- adf.test(housing$wage_income, k = 12)
+
+adf_rent
+adf_rate
+adf_wage
+
+
+## Step 4 (rent): Fit the main OLS regression
+## Dependent variable: rent_aff (rent affordability index)
+## Key regressors: mortgage_rate, wage_income
+## This is a simple association, not a causal structural model.
+
+mod_rent <- lm(rent_aff ~ mortgage_rate + wage_income,
+               data = housing)
+
+summary(mod_rent)
+
+
+## Step 5 (rent): Build a clean regression table
+
+reg_rent_sum  <- summary(mod_rent)
+coef_rent_tab <- coef(reg_rent_sum)  # matrix with Estimate, Std. Error, t value, Pr(>|t|)
+
+# Extract R-squared and adjusted R-squared
+r2_rent     <- reg_rent_sum$r.squared
+adj_r2_rent <- reg_rent_sum$adj.r.squared
+
+kable(round(coef_rent_tab, 4),
+      caption = "Regression of rent affordability on mortgage rate and wages")
+
+cat(sprintf("R-squared: %.3f\nAdjusted R-squared: %.3f\n",
+            r2_rent, adj_r2_rent))
+
+
+## Step 6 (rent): Diagnostics for the regression model
+##  (1) Residual plots → linearity, equal variance, outliers
+##  (2) Residuals over time → any obvious patterns?
+##  (3) Autocorrelation in residuals → ACF + Durbin–Watson
+##  (4) Normality of residuals → QQ plot + Shapiro–Wilk test
+
+# 6.1 Basic residual plots (linearity, equal variance, influential points)
+# Common aesthetics
+pt_col  <- rgb(0.4, 0.4, 0.4, 0.7)
+line_col <- "blue"
+
+# Extract quantities
+fitted_rent <- fitted(mod_rent)
+resid_rent  <- resid(mod_rent)
+std_resid   <- rstandard(mod_rent)
+lev         <- hatvalues(mod_rent)
+
+par(mfrow = c(2, 2),
+    mar = c(4.5, 4.5, 3, 1))
+
+## (1) Residuals vs Fitted
+plot(fitted_rent, resid_rent,
+     pch = 16, cex = 0.9, col = pt_col,
+     xlab = "Fitted values",
+     ylab = "Residuals",
+     main = "Residuals vs Fitted",
+     bty = "l")
+grid(col = "grey85")
+lines(lowess(fitted_rent, resid_rent),
+      col = line_col, lwd = 2)
+abline(h = 0, lty = 2, col = "grey40")
+
+## (2) Normal Q–Q
+qqnorm(std_resid,
+       pch = 16, cex = 0.8, col = pt_col,
+       main = "Normal Q–Q",
+       xlab = "Theoretical Quantiles",
+       ylab = "Standardized residuals",
+       bty = "l")
+qqline(std_resid, col = line_col, lwd = 2)
+grid(col = "grey85")
+
+## (3) Scale–Location
+plot(fitted_rent, sqrt(abs(std_resid)),
+     pch = 16, cex = 0.9, col = pt_col,
+     xlab = "Fitted values",
+     ylab = expression(sqrt("|Standardized residuals|")),
+     main = "Scale–Location",
+     bty = "l")
+grid(col = "grey85")
+lines(lowess(fitted_rent, sqrt(abs(std_resid))),
+      col = line_col, lwd = 2)
+
+## (4) Residuals vs Leverage
+plot(lev, std_resid,
+     pch = 16, cex = 0.9, col = pt_col,
+     xlab = "Leverage",
+     ylab = "Standardized residuals",
+     main = "Residuals vs Leverage",
+     bty = "l")
+grid(col = "grey85")
+lines(lowess(lev, std_resid),
+      col = line_col, lwd = 2)
+abline(h = c(-2, 0, 2),
+       lty = c(2, 1, 2),
+       col = "grey40")
+
+par(mfrow = c(1, 1))
+
+# 6.2 Residuals over time
+res_rent <- resid(mod_rent)
+
+covid_start <- as.Date("2020-03-01")
+covid_end   <- as.Date("2021-12-01")
+
+par(mar = c(4.5, 4.5, 3, 1))
+
+plot(housing$date, res_rent,
+     type = "n",
+     xlab = "Date",
+     ylab = "Residuals (index points)",
+     main = "Rent affordability residuals over time",
+     bty = "l")
+
+grid(col = "grey90")
+
+# highlight COVID period
+usr <- par("usr")
+rect(covid_start, usr[3], covid_end, usr[4],
+     col = rgb(1, 0, 0, 0.06), border = NA)
+
+# emphasize structure first, noise second
+lines(housing$date, res_rent,
+      col = "grey40", lwd = 1.4)
+
+points(housing$date, res_rent,
+       pch = 16, cex = 0.35,
+       col = rgb(0.3, 0.3, 0.3, 0.5))
+
+abline(h = 0, lty = 2, col = "grey40")
+
+mtext("Shaded area indicates COVID-19 period",
+      side = 3, line = 0.3, adj = 1,
+      cex = 0.75, col = "grey40")
+
+# 6.3 Autocorrelation diagnostics
+acf(resid(mod_rent),
+    main = "ACF of rent affordability residuals",
+    xlab = "Lag (months)",
+    ylab = "Autocorrelation")
+
+# Durbin–Watson test for first-order autocorrelation
+# H0: no first-order autocorrelation in errors
+dwtest(mod_rent)
+
+# 6.4 Normality diagnostics
+qqnorm(resid(mod_rent),
+       main = "Normal Q–Q plot: rent affordability residuals",
+       pch = 16, cex = 0.6, col = "grey40")
+qqline(resid(mod_rent), col = "red", lwd = 2)
+
+# Shapiro–Wilk test of normality (large n → very sensitive)
+# H0: residuals are normally distributed
+shapiro.test(resid(mod_rent))
+```
